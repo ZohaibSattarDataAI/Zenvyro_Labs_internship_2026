@@ -4,3 +4,12 @@ requests
 pandas
 numpy
 scikit-learn
+
+# LangChain
+langchain
+langchain-community
+langchain-core
+langchain-ollama
+
+# Optional (recommended)
+python-dotenv

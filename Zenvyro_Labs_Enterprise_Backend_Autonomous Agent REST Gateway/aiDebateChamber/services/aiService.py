@@ -1,151 +1,139 @@
 """
 AI Debate Service Module
-Handles communication with local LLM (Ollama) and manages debate logic
+Handles communication with local LLM (Ollama) using LangChain and manages debate logic
 """
 
-import requests
-import json
-import time
-from typing import List, Dict, Optional
+import logging
+from typing import List, Dict, Optional, Tuple
+from datetime import datetime
+
+from langchain_ollama import ChatOllama
+from langchain_core.messages import (
+    SystemMessage,
+    HumanMessage,
+    AIMessage,
+    BaseMessage
+)
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.output_parsers import StrOutputParser
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 
 class DebateConductor:
     """
     Orchestrates the debate between two AI agents with context memory.
-    Uses Ollama for local LLM inference.
+    Uses LangChain ChatOllama for local LLM inference.
     """
     
-    def __init__(self, model: str = "qwen2.5:1.5b", ollama_url: str = "http://localhost:11434/api/generate"):
+    def __init__(
+        self,
+        model: str = "qwen2.5:1.5b",
+        base_url: str = "http://localhost:11434",
+        temperature: float = 0.7,
+        max_tokens: int = 200
+    ):
         """
         Initialize the debate conductor.
         
         Args:
             model: Ollama model name to use
-            ollama_url: Ollama API endpoint
+            base_url: Ollama API base URL
+            temperature: Creativity temperature (0-1)
+            max_tokens: Maximum tokens to generate
         """
-        self.ollama_url = ollama_url
         self.model = model
+        self.base_url = base_url
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        
+        # Initialize LangChain ChatOllama
+        self.llm = ChatOllama(
+            model=model,
+            base_url=base_url,
+            temperature=temperature,
+            num_predict=max_tokens,
+            top_p=0.9
+        )
+        
+        # Debate history storage
         self.debate_history: List[Dict[str, str]] = []
-        self.max_history_tokens = 1000  # Limit context window
+        self.messages: List[BaseMessage] = []
+        self.current_topic: str = ""
         
         # Persona system prompts for each agent
-        self.agent_a_system = """
-You are Agent A, a passionate advocate and expert debater. Your mission is to:
+        self.agent_a_system = """You are Agent A, a passionate advocate and expert debater. Your mission is to:
 - STRONGLY SUPPORT and defend the given topic
 - Use logical reasoning, facts, and real-world examples
 - Counter any opposition with confidence and charisma
 - Structure your arguments with clear premises and conclusions
 - Sound authoritative, persuasive, and unshakeable
 - Attack weak points in opposition arguments when referenced
-"""
+- Keep responses concise (under 50 words) but powerful
+- End with a definitive statement
+
+Debate Topic: {topic}"""
         
-        self.agent_b_system = """
-You are Agent B, a fierce challenger and critical thinker. Your mission is to:
+        self.agent_b_system = """You are Agent B, a fierce challenger and critical thinker. Your mission is to:
 - STRONGLY OPPOSE and dismantle the given topic
 - Use facts, logic, and counter-examples
 - Expose flaws and weaknesses in the opposition's arguments
 - Structure rebuttals with precision and impact
 - Sound skeptical, analytical, and devastatingly logical
 - Build on previous counter-arguments for maximum effect
-"""
+- Keep responses concise (under 50 words) but impactful
+- End with a definitive rebuttal
+
+Debate Topic: {topic}"""
+        
+        self.parser = StrOutputParser()
+        
+        logger.info(f"DebateConductor initialized with model: {model}")
     
-    def _call_ollama(self, prompt: str, system_prompt: str, temperature: float = 0.7) -> str:
+    def _get_conversation_history(self, max_turns: int = 3) -> str:
         """
-        Send a prompt to the local Ollama model with error handling.
+        Get formatted conversation history for context.
         
         Args:
-            prompt: The user prompt
-            system_prompt: System instruction for the model
-            temperature: Creativity temperature (0-1)
+            max_turns: Maximum number of recent turns to include
             
-        Returns:
-            Model response text or error message
-        """
-        # Truncate history if too long to prevent context overflow
-        full_prompt = self._prepare_prompt(prompt, system_prompt)
-        
-        payload = {
-            "model": self.model,
-            "prompt": full_prompt,
-            "stream": False,
-            "temperature": temperature,
-            "max_tokens": 200,
-            "top_p": 0.9
-        }
-        
-        try:
-            response = requests.post(
-                self.ollama_url,
-                json=payload,
-                timeout=60  # 60 second timeout
-            )
-            response.raise_for_status()
-            
-            data = response.json()
-            return data.get("response", "").strip()
-            
-        except requests.exceptions.ConnectionError:
-            return "[ERROR] Cannot connect to Ollama. Please ensure Ollama is running."
-        except requests.exceptions.Timeout:
-            return "[ERROR] Ollama request timed out. Model may be overloaded."
-        except requests.exceptions.RequestException as e:
-            return f"[ERROR] {str(e)}"
-        except json.JSONDecodeError:
-            return "[ERROR] Invalid response from Ollama."
-    
-    def _prepare_prompt(self, prompt: str, system_prompt: str) -> str:
-        """
-        Prepare the full prompt with system instructions and history.
-        
-        Args:
-            prompt: User prompt
-            system_prompt: System instructions
-            
-        Returns:
-            Complete prompt string
-        """
-        # Format history for context
-        history_text = self._format_history()
-        
-        # Build complete prompt
-        full_prompt = f"""{system_prompt}
-
-IMPORTANT CONTEXT - Previous arguments:
-{history_text}
-
-Current turn topic/question:
-{prompt}
-
-Rules:
-- Keep response under 50 words
-- Be concise but powerful
-- Reference previous arguments when relevant
-- End with a definitive statement
-
-Your response:"""
-        
-        return full_prompt
-    
-    def _format_history(self) -> str:
-        """
-        Format debate history for context window.
-        
         Returns:
             Formatted history string
         """
         if not self.debate_history:
-            return "No previous arguments."
+            return "No previous arguments in this debate."
         
-        # Get last 3 turns for context (to limit token usage)
-        recent_history = self.debate_history[-6:]  # Last 3 turns (A + B)
+        # Get last N turns
+        recent = self.debate_history[-max_turns * 2:]  # Each turn has 2 messages
         
-        formatted = []
-        for entry in recent_history:
+        history_parts = []
+        for entry in recent:
             speaker = entry.get("speaker", "Unknown")
             text = entry.get("text", "")
-            formatted.append(f"{speaker}: {text[:150]}...")  # Truncate long entries
+            history_parts.append(f"{speaker}: {text}")
         
-        return "\n".join(formatted)
+        return "\n".join(history_parts) if history_parts else "No previous arguments."
+    
+    def _create_chain(self, system_prompt: str, topic: str):
+        """
+        Create a LangChain chain with the given system prompt.
+        
+        Args:
+            system_prompt: System prompt template
+            topic: Current debate topic
+            
+        Returns:
+            Runnable chain
+        """
+        prompt = ChatPromptTemplate.from_messages([
+            SystemMessage(content=system_prompt.format(topic=topic)),
+            MessagesPlaceholder(variable_name="history"),
+            HumanMessage(content="{input}")
+        ])
+        
+        return prompt | self.llm | self.parser
     
     def generate_agent_a_response(self, topic: str) -> str:
         """
@@ -157,24 +145,48 @@ Your response:"""
         Returns:
             Agent A's response
         """
-        prompt = f"""
-Topic to support: "{topic}"
+        self.current_topic = topic
+        history = self._get_conversation_history()
+        
+        user_prompt = f"""Topic: "{topic}"
 
-Provide a compelling argument in favor of this topic.
-Reference any previous counter-arguments if they exist.
-"""
+Previous arguments:
+{history}
+
+Provide a compelling argument in favor of this topic. Reference any previous counter-arguments if they exist and counter them effectively.
+
+Your response:"""
         
-        response = self._call_ollama(prompt, self.agent_a_system, temperature=0.6)
-        
-        # Store in history with metadata
-        self.debate_history.append({
-            "speaker": "Agent A",
-            "text": response,
-            "turn": len(self.debate_history) + 1,
-            "timestamp": time.time()
-        })
-        
-        return response
+        try:
+            chain = self._create_chain(self.agent_a_system, topic)
+            
+            response = chain.invoke({
+                "history": self.messages,
+                "input": user_prompt
+            })
+            
+            # Clean up response
+            response = response.strip()
+            if not response:
+                response = "I strongly support this position based on evidence and logic."
+            
+            # Store in history
+            self.debate_history.append({
+                "speaker": "Agent A",
+                "text": response,
+                "turn": len(self.debate_history) + 1,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Store in LangChain message history
+            self.messages.append(AIMessage(content=response))
+            
+            logger.info(f"Agent A responded (turn {len(self.debate_history)})")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error generating Agent A response: {str(e)}")
+            raise RuntimeError(f"Failed to generate Agent A response: {str(e)}")
     
     def generate_agent_b_response(self, topic: str) -> str:
         """
@@ -186,39 +198,84 @@ Reference any previous counter-arguments if they exist.
         Returns:
             Agent B's response
         """
-        prompt = f"""
-Topic to oppose: "{topic}"
+        self.current_topic = topic
+        history = self._get_conversation_history()
+        
+        user_prompt = f"""Topic: "{topic}"
 
-Provide a devastating rebuttal against this topic.
-Attack specific points made by Agent A if available.
-Use evidence and logic to dismantle their argument.
-"""
+Previous arguments:
+{history}
+
+Provide a devastating rebuttal against this topic. Attack specific points made by Agent A if available. Use evidence and logic to dismantle their argument.
+
+Your response:"""
         
-        response = self._call_ollama(prompt, self.agent_b_system, temperature=0.7)
-        
-        # Store in history with metadata
-        self.debate_history.append({
-            "speaker": "Agent B",
-            "text": response,
-            "turn": len(self.debate_history) + 1,
-            "timestamp": time.time()
-        })
-        
-        return response
+        try:
+            chain = self._create_chain(self.agent_b_system, topic)
+            
+            response = chain.invoke({
+                "history": self.messages,
+                "input": user_prompt
+            })
+            
+            # Clean up response
+            response = response.strip()
+            if not response:
+                response = "I strongly oppose this position with compelling counter-evidence."
+            
+            # Store in history
+            self.debate_history.append({
+                "speaker": "Agent B",
+                "text": response,
+                "turn": len(self.debate_history) + 1,
+                "timestamp": datetime.now().isoformat()
+            })
+            
+            # Store in LangChain message history
+            self.messages.append(AIMessage(content=response))
+            
+            logger.info(f"Agent B responded (turn {len(self.debate_history)})")
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error generating Agent B response: {str(e)}")
+            raise RuntimeError(f"Failed to generate Agent B response: {str(e)}")
     
     def get_history(self) -> List[Dict[str, str]]:
         """Get the full debate history."""
         return self.debate_history
     
-    def reset_history(self):
+    def reset_history(self) -> None:
         """Reset the debate history."""
         self.debate_history = []
+        self.messages = []
+        self.current_topic = ""
+        logger.info("Debate history reset")
     
     def get_last_response(self) -> Optional[str]:
         """Get the last response from either agent."""
         if self.debate_history:
             return self.debate_history[-1].get("text")
         return None
+    
+    def get_last_speaker(self) -> Optional[str]:
+        """Get the last speaker."""
+        if self.debate_history:
+            return self.debate_history[-1].get("speaker")
+        return None
+    
+    def get_turn_count(self) -> int:
+        """Get the current turn count."""
+        return len(self.debate_history)
+
+    def reset(self) -> None:
+        """Reset debate history and state."""
+        # Clear history and messages, reset topic and round counter
+        self.debate_history = []
+        self.messages = []
+        self.current_round = 1
+        self.current_topic = ""
+        logger.info("Debate state reset")
 
 
 # ===============================
@@ -226,9 +283,25 @@ Use evidence and logic to dismantle their argument.
 # ===============================
 
 if __name__ == "__main__":
+    import time
+    
     print("=" * 60)
-    print("Testing DebateConductor")
+    print("Testing DebateConductor with LangChain")
     print("=" * 60)
+    
+    # Check if Ollama is running
+    try:
+        import requests
+        response = requests.get("http://localhost:11434/api/tags", timeout=5)
+        if response.status_code != 200:
+            print("⚠️  Ollama may not be running properly.")
+            print("   Please start Ollama with: ollama serve")
+            print("   And pull a model: ollama pull qwen2.5:1.5b")
+    except:
+        print("⚠️  Cannot connect to Ollama at http://localhost:11434")
+        print("   Please start Ollama with: ollama serve")
+        print("   And pull a model: ollama pull qwen2.5:1.5b")
+        exit(1)
     
     # Test debate
     debate = DebateConductor()
@@ -239,15 +312,21 @@ if __name__ == "__main__":
     print("=" * 60)
     
     print("\n[Agent A - Supporting]\n")
+    start = time.time()
     response_a = debate.generate_agent_a_response(topic)
     print(response_a)
+    print(f"⏱️  Response time: {time.time() - start:.2f}s")
     
     print("\n[Agent B - Opposing]\n")
+    start = time.time()
     response_b = debate.generate_agent_b_response(topic)
     print(response_b)
+    print(f"⏱️  Response time: {time.time() - start:.2f}s")
     
     print("\n" + "=" * 60)
     print("History Summary:")
     print("=" * 60)
     for entry in debate.get_history():
         print(f"{entry['speaker']} (Turn {entry['turn']}): {entry['text'][:80]}...")
+    
+    print("\n✅ DebateConductor test completed successfully!")
