@@ -1,0 +1,92 @@
+# ==========================
+# Python
+# ==========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual Environment
+venv/
+.venv/
+env/
+ENV/
+rvc_venv/
+
+# Python packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment Variables
+.env
+.env.*
+
+# Temporary Files
+temp/
+tmp/
+*.tmp
+
+# Python Cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Hugging Face Cache
+hf_cache/
+.cache/
+
+# Generated Audio
+*.wav
+*.mp3
+*.flac
+*.ogg
+
+# Generated Videos
+*.mp4
+
+# Output Files
+output/
+outputs/
+results/
+
+# ML Training Data
+training_data/
+
+# Model Checkpoints (optional - remove if you want to upload models)
+checkpoints/
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# RVC Models (optional)
+rvc_models/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage
+.coverage
+htmlcov/
+
+# Gradio
+gradio_cached_examples/
+
+# Local Config
+inference_config.toml
